@@ -63,8 +63,8 @@ func run(ctx context.Context, dryRun bool) (err error) {
 	inUseImagesByContainerMap := map[string]struct{}{}
 	fmt.Printf("Images in use (ECS):\n")
 	for _, img := range inUseImagesECS {
-		fmt.Printf("  %v %v\n", img.ServiceName, img.Container)
-		inUseImagesByContainerMap[img.Container] = struct{}{}
+		fmt.Printf("  %v %v\n", img.ImageName, img.Image)
+		inUseImagesByContainerMap[img.Image] = struct{}{}
 	}
 	fmt.Printf("Images in use (Lambda):\n")
 	for _, img := range inUseImagesLambda {
@@ -205,59 +205,31 @@ func getRepositoryImages(ctx context.Context, svc *ecr.Client, repositoryName st
 }
 
 type inUseImageECS struct {
-	Cluster     string
-	ServiceName string
-	Container   string
+	ImageName string
+	Image     string
 }
 
 func getInUseImages(ctx context.Context, cfg aws.Config) (images []inUseImageECS, err error) {
 	ecsService := ecs.NewFromConfig(cfg)
 
-	clusters, err := getClusters(ctx, ecsService)
+	taskDefs, err := ecsService.ListTaskDefinitions(ctx, &ecs.ListTaskDefinitionsInput{})
 	if err != nil {
 		return
 	}
 
-	for _, cluster := range clusters {
-		cluster := cluster
-
-		var services []string
-		services, err = getClusterServices(ctx, ecsService, cluster)
+	taskDefArns := taskDefs.TaskDefinitionArns
+	for _, arn := range taskDefArns {
+		output, err := ecsService.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{TaskDefinition: &arn})
 		if err != nil {
-			return
+			return nil, err
 		}
+		containerDefs := output.TaskDefinition.ContainerDefinitions
 
-		var serviceNames []string
-		for servicesBatch := range pager.New(services, 10) {
-			var serviceNameBatch []string
-			serviceNameBatch, err = getClusterServiceNames(ctx, ecsService, cluster, servicesBatch)
-			if err != nil {
-				return
-			}
-			serviceNames = append(serviceNames, serviceNameBatch...)
-		}
-
-		for _, service := range serviceNames {
-			var taskARNs []string
-			taskARNs, err = getClusterServiceTaskARNs(ctx, ecsService, cluster, service)
-			if err != nil {
-				return
-			}
-
-			for taskARNsBatch := range pager.New(taskARNs, 10) {
-				var containerIDsBatch []string
-				containerIDsBatch, err = getClusterTaskContainer(ctx, ecsService, cluster, taskARNsBatch)
-				if err != nil {
-					return
-				}
-				for _, cnt := range containerIDsBatch {
-					images = append(images, inUseImageECS{
-						Cluster:     cluster,
-						ServiceName: service,
-						Container:   cnt,
-					})
-				}
-			}
+		for _, containerDef := range containerDefs {
+			images = append(images, inUseImageECS{
+				ImageName: *containerDef.Name,
+				Image:     *containerDef.Image,
+			})
 		}
 	}
 
